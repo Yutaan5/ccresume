@@ -44,8 +44,12 @@ func assistantText(line []byte) (string, bool) {
 	}
 	var parts []string
 	for _, b := range blocks {
-		if b.Type == "text" && strings.TrimSpace(b.Text) != "" {
-			parts = append(parts, b.Text)
+		if b.Type != "text" {
+			continue
+		}
+		text := SanitizeDisplay(b.Text)
+		if strings.TrimSpace(text) != "" {
+			parts = append(parts, text)
 		}
 	}
 	if len(parts) == 0 {
@@ -83,6 +87,7 @@ func userPromptText(r *record) (string, bool) {
 
 // truncateTitle は改行を潰し、表示幅ベースで切り詰める（日本語安全）。
 func truncateTitle(s string) string {
+	s = SanitizeDisplay(s)
 	s = strings.Join(strings.Fields(s), " ")
 	return runewidth.Truncate(s, titleMaxWidth, "…")
 }

@@ -13,9 +13,9 @@ type Project struct {
 // DisplayName は一覧表示用のプロジェクト名を返す。
 func (p *Project) DisplayName() string {
 	if p.CWD != "" {
-		return p.CWD
+		return SanitizeDisplay(p.CWD)
 	}
-	return p.DirName
+	return SanitizeDisplay(p.DirName)
 }
 
 // Session は1つの会話履歴（.jsonl ファイル）。
@@ -31,4 +31,6 @@ type Session struct {
 }
 
 // FilterValue は bubbles/list のフィルタ対象文字列。
-func (s *Session) FilterValue() string { return s.Title + " " + s.ID }
+func (s *Session) FilterValue() string {
+	return SanitizeDisplay(s.Title) + " " + SanitizeDisplay(s.ID)
+}

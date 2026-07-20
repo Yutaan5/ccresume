@@ -66,6 +66,9 @@ func parseSurfaceRef(out string) (string, bool) {
 // OpenResumeTab は現在の cmux ワークスペースに新しいターミナルタブを作り、
 // そこで claude --resume を実行させる。失敗したら new-workspace にフォールバック。
 func OpenResumeTab(cwd, sessionID string) error {
+	if err := ValidateTarget(cwd, sessionID); err != nil {
+		return err
+	}
 	if err := openInNewSurface(cwd, sessionID); err != nil {
 		if fbErr := openInNewWorkspace(cwd, sessionID); fbErr != nil {
 			return fmt.Errorf("%v（フォールバックも失敗: %v）", err, fbErr)
@@ -111,7 +114,7 @@ func waitForShell(ref string) {
 }
 
 func openInNewWorkspace(cwd, sessionID string) error {
-	args := []string{"new-workspace", "--command", "claude --resume " + sessionID, "--focus", "true"}
+	args := []string{"new-workspace", "--command", resumeShellCommand(sessionID), "--focus", "true"}
 	if cwd != "" {
 		args = append(args, "--cwd", cwd)
 	}

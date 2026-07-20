@@ -31,6 +31,10 @@ func Scan() ([]*Project, error) {
 	if err != nil {
 		return nil, err
 	}
+	return scanRoot(root)
+}
+
+func scanRoot(root string) ([]*Project, error) {
 	dirs, err := os.ReadDir(root)
 	if err != nil {
 		return nil, err
@@ -52,12 +56,16 @@ func Scan() ([]*Project, error) {
 			if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
 				continue
 			}
+			id := strings.TrimSuffix(e.Name(), ".jsonl")
+			if !ValidID(id) {
+				continue
+			}
 			info, err := e.Info()
 			if err != nil {
 				continue
 			}
 			s := &Session{
-				ID:      strings.TrimSuffix(e.Name(), ".jsonl"),
+				ID:      id,
 				Path:    filepath.Join(p.Path, e.Name()),
 				ModTime: info.ModTime(),
 				Size:    info.Size(),

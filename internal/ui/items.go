@@ -9,11 +9,11 @@ import (
 
 type sessionItem struct{ s *session.Session }
 
-func (i sessionItem) Title() string { return i.s.Title }
+func (i sessionItem) Title() string { return session.SanitizeDisplay(i.s.Title) }
 func (i sessionItem) Description() string {
 	desc := relTime(i.s.ModTime)
 	if i.s.GitBranch != "" {
-		desc += " · " + i.s.GitBranch
+		desc += " · " + session.SanitizeDisplay(i.s.GitBranch)
 	}
 	return desc
 }

@@ -116,6 +116,18 @@ func TestLastAssistantText_JoinsMultipleTextBlocks(t *testing.T) {
 	}
 }
 
+func TestLastAssistantText_RemovesTerminalControls(t *testing.T) {
+	line := `{"type":"assistant","isSidechain":false,"message":{"role":"assistant","content":[{"type":"text","text":"before\u001b]52;c;ZXZpbA==\u0007after\u001b[2J"}]}}`
+	path := writeSession(t, line)
+	got, err := LastAssistantText(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "beforeafter" {
+		t.Fatalf("got %q", got)
+	}
+}
+
 func TestEnrich_AiTitleFromTail(t *testing.T) {
 	lines := []string{userLine("最初の質問です")}
 	for range 50 {

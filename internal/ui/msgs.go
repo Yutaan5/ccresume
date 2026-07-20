@@ -30,8 +30,10 @@ type rerenderMsg struct {
 }
 
 type deletedMsg struct {
-	path string
-	err  error
+	seq         uint64
+	projectPath string
+	path        string
+	err         error
 }
 
 type cmuxDoneMsg struct{ err error }
@@ -50,6 +52,7 @@ func previewTickCmd(seq int) tea.Cmd {
 }
 
 func renderMarkdown(raw string, width int) string {
+	raw = session.SanitizeDisplay(raw)
 	if width < 10 {
 		width = 10
 	}
@@ -73,6 +76,7 @@ func loadPreviewCmd(path string, seq, width int) tea.Cmd {
 		if err != nil {
 			return previewMsg{seq: seq, err: err}
 		}
+		raw = session.SanitizeDisplay(raw)
 		return previewMsg{seq: seq, raw: raw, md: renderMarkdown(raw, width)}
 	}
 }
@@ -83,9 +87,9 @@ func rerenderCmd(raw string, seq, width int) tea.Cmd {
 	}
 }
 
-func deleteCmd(path string) tea.Cmd {
+func deleteCmd(seq uint64, projectPath, path string) tea.Cmd {
 	return func() tea.Msg {
-		return deletedMsg{path: path, err: removeFile(path)}
+		return deletedMsg{seq: seq, projectPath: projectPath, path: path, err: removeFile(path)}
 	}
 }
 

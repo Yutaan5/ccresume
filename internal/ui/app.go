@@ -39,14 +39,23 @@ type App struct {
 	previewState string // "", "loading", "ready", "empty", "error"
 
 	curSessionID string
-	deleting     *session.Session
+	deleting     *deleteTarget
 	execTarget   *resume.ExecTarget
 	status       string
 	statusIsErr  bool
 	loadErr      error
 
+	nextDeleteSeq  uint64
+	pendingDeletes map[uint64]deleteTarget
+	deletedPaths   map[string]struct{}
+
 	width, height int
 	ready         bool
+}
+
+type deleteTarget struct {
+	projectPath string
+	session     *session.Session
 }
 
 // ExecTarget は TUI 終了後に main が exec すべき対象（nil なら何もしない）。
@@ -68,11 +77,13 @@ func New() App {
 	pl.DisableQuitKeybindings()
 
 	return App{
-		mode:        modeLoading,
-		spinner:     sp,
-		sessionList: sl,
-		projectList: pl,
-		preview:     viewport.New(0, 0),
+		mode:           modeLoading,
+		spinner:        sp,
+		sessionList:    sl,
+		projectList:    pl,
+		preview:        viewport.New(0, 0),
+		pendingDeletes: make(map[uint64]deleteTarget),
+		deletedPaths:   make(map[string]struct{}),
 	}
 }
 
@@ -131,7 +142,7 @@ func (m App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.preview.SetContent(placeholderStyle.Render("（このセッションにはアシスタントのテキスト応答がありません）"))
 			} else {
 				m.previewState = "error"
-				m.preview.SetContent(placeholderStyle.Render("読み込みエラー: " + msg.err.Error()))
+				m.preview.SetContent(placeholderStyle.Render("読み込みエラー: " + session.SanitizeDisplay(msg.err.Error())))
 			}
 			return m, nil
 		}
@@ -180,10 +191,16 @@ func (m App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case modeConfirmDelete:
 		switch {
 		case key.Matches(msg, keys.ConfirmYes):
-			s := m.deleting
+			target := m.deleting
 			m.deleting = nil
 			m.mode = modeBrowse
-			return m, deleteCmd(s.Path)
+			if target == nil || target.session == nil {
+				return m, nil
+			}
+			m.nextDeleteSeq++
+			seq := m.nextDeleteSeq
+			m.pendingDeletes[seq] = *target
+			return m, deleteCmd(seq, target.projectPath, target.session.Path)
 		default:
 			m.deleting = nil
 			m.mode = modeBrowse
@@ -247,8 +264,10 @@ func (m App) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.startResume()
 		case key.Matches(msg, keys.Delete):
 			if s := m.selectedSession(); s != nil {
-				m.deleting = s
-				m.mode = modeConfirmDelete
+				if p := m.currentProject(); p != nil {
+					m.deleting = &deleteTarget{projectPath: p.Path, session: s}
+					m.mode = modeConfirmDelete
+				}
 			}
 			return m, nil
 		case key.Matches(msg, keys.Projects):
@@ -319,6 +338,10 @@ func (m App) startResume() (tea.Model, tea.Cmd) {
 	if s == nil {
 		return m, nil
 	}
+	if err := resume.ValidateTarget(s.CWD, s.ID); err != nil {
+		m.setError("resume できません: " + err.Error())
+		return m, nil
+	}
 	if resume.InCmux() {
 		m.status = "新しいタブを開いています…"
 		return m, resumeCmuxCmd(s.CWD, s.ID)
@@ -332,6 +355,20 @@ func (m App) applyIndex(projects []*session.Project) (tea.Model, tea.Cmd) {
 	if len(m.projects) > 0 && m.curProj < len(m.projects) {
 		prevDir = m.projects[m.curProj].DirName
 	}
+	filtered := projects[:0]
+	for _, p := range projects {
+		sessions := p.Sessions[:0]
+		for _, s := range p.Sessions {
+			if _, deleted := m.deletedPaths[s.Path]; !deleted {
+				sessions = append(sessions, s)
+			}
+		}
+		p.Sessions = sessions
+		if len(p.Sessions) > 0 {
+			filtered = append(filtered, p)
+		}
+	}
+	projects = filtered
 	m.projects = projects
 	m.curProj = 0
 	for i, p := range projects {
@@ -350,15 +387,25 @@ func (m App) applyIndex(projects []*session.Project) (tea.Model, tea.Cmd) {
 	m.mode = modeBrowse
 	if len(projects) == 0 {
 		m.loadErr = fmt.Errorf("セッションが見つかりません（~/.claude/projects が空です）")
+		m.sessionList.SetItems(nil)
 		return m, nil
 	}
+	m.loadErr = nil
 	m.setSessionItems(0)
 	m.layout()
 	return m, m.schedulePreview()
 }
 
 func (m *App) setSessionItems(cursor int) {
-	p := m.projects[m.curProj]
+	p := m.currentProject()
+	if p == nil {
+		m.sessionList.SetItems(nil)
+		m.curSessionID = ""
+		m.previewState = ""
+		m.previewRaw = ""
+		m.preview.SetContent("")
+		return
+	}
 	items := make([]list.Item, len(p.Sessions))
 	for i, s := range p.Sessions {
 		items[i] = sessionItem{s: s}
@@ -377,13 +424,38 @@ func (m *App) setSessionItems(cursor int) {
 }
 
 func (m App) applyDeleted(msg deletedMsg) (tea.Model, tea.Cmd) {
+	target, ok := m.pendingDeletes[msg.seq]
+	if !ok || target.projectPath != msg.projectPath || target.session == nil || target.session.Path != msg.path {
+		return m, nil
+	}
+	delete(m.pendingDeletes, msg.seq)
 	if msg.err != nil {
 		m.setError("削除に失敗: " + msg.err.Error())
 		return m, nil
 	}
-	p := m.projects[m.curProj]
+	m.deletedPaths[msg.path] = struct{}{}
+	m.status = "削除しました"
+	m.statusIsErr = false
+
+	originIndex := -1
+	for i, p := range m.projects {
+		if p.Path == msg.projectPath {
+			originIndex = i
+			break
+		}
+	}
+	if originIndex < 0 {
+		return m, nil
+	}
+
+	currentPath := ""
+	if p := m.currentProject(); p != nil {
+		currentPath = p.Path
+	}
+	originWasCurrent := originIndex == m.curProj
 	cursor := m.sessionList.Index()
-	kept := p.Sessions[:0]
+	p := m.projects[originIndex]
+	kept := make([]*session.Session, 0, len(p.Sessions))
 	for _, s := range p.Sessions {
 		if s.Path != msg.path {
 			kept = append(kept, s)
@@ -391,23 +463,53 @@ func (m App) applyDeleted(msg deletedMsg) (tea.Model, tea.Cmd) {
 	}
 	p.Sessions = kept
 	if len(p.Sessions) == 0 {
-		// 空になったプロジェクトは除外して先頭に移動
-		var projs []*session.Project
-		for _, q := range m.projects {
-			if q != p {
-				projs = append(projs, q)
-			}
-		}
-		return m.applyIndex(projs)
+		m.projects = append(m.projects[:originIndex], m.projects[originIndex+1:]...)
 	}
-	m.setSessionItems(cursor)
-	m.status = "削除しました"
-	return m, m.schedulePreview()
+
+	if len(m.projects) == 0 {
+		m.curProj = 0
+		m.projectList.SetItems(nil)
+		m.setSessionItems(0)
+		m.loadErr = fmt.Errorf("セッションが見つかりません（~/.claude/projects が空です）")
+		return m, nil
+	}
+
+	m.curProj = 0
+	for i, q := range m.projects {
+		if q.Path == currentPath {
+			m.curProj = i
+			break
+		}
+	}
+	m.setProjectItems()
+	if originWasCurrent {
+		m.setSessionItems(cursor)
+		return m, m.schedulePreview()
+	}
+	return m, nil
 }
 
 func (m *App) setError(s string) {
-	m.status = s
+	m.status = session.SanitizeDisplay(s)
 	m.statusIsErr = true
+}
+
+func (m *App) setProjectItems() {
+	items := make([]list.Item, len(m.projects))
+	for i, p := range m.projects {
+		items[i] = projectItem{p: p}
+	}
+	m.projectList.SetItems(items)
+	if m.curProj >= 0 && m.curProj < len(items) {
+		m.projectList.Select(m.curProj)
+	}
+}
+
+func (m *App) currentProject() *session.Project {
+	if m.curProj < 0 || m.curProj >= len(m.projects) {
+		return nil
+	}
+	return m.projects[m.curProj]
 }
 
 func (m App) selectedSession() *session.Session {
@@ -456,7 +558,7 @@ func (m App) View() string {
 		return m.projectList.View() + "\n" + statusStyle.Render(" "+helpProjects)
 	default:
 		if m.loadErr != nil {
-			return placeholderStyle.Render(m.loadErr.Error()+"\n\nr: 再読込  q: 終了") + "\n"
+			return placeholderStyle.Render(session.SanitizeDisplay(m.loadErr.Error())+"\n\nr: 再読込  q: 終了") + "\n"
 		}
 		return m.browseView()
 	}
@@ -469,7 +571,7 @@ func (m App) browseView() string {
 	if s := m.selectedSession(); s != nil {
 		meta := relTime(s.ModTime)
 		if s.GitBranch != "" {
-			meta += " · " + s.GitBranch
+			meta += " · " + session.SanitizeDisplay(s.GitBranch)
 		}
 		header += " " + previewMetaStyle.Render(meta)
 	}
@@ -480,12 +582,13 @@ func (m App) browseView() string {
 
 	footer := " " + helpBrowse
 	if m.mode == modeConfirmDelete && m.deleting != nil {
-		footer = confirmStyle.Render(fmt.Sprintf(" 本当に削除しますか？ %s (y/N)", m.deleting.Title))
+		footer = confirmStyle.Render(fmt.Sprintf(" 本当に削除しますか？ %s (y/N)", session.SanitizeDisplay(m.deleting.session.Title)))
 	} else if m.status != "" {
+		status := session.SanitizeDisplay(m.status)
 		if m.statusIsErr {
-			footer = errorStyle.Render(" " + m.status)
+			footer = errorStyle.Render(" " + status)
 		} else {
-			footer = statusStyle.Render(" " + m.status)
+			footer = statusStyle.Render(" " + status)
 		}
 	} else {
 		footer = statusStyle.Render(footer)
